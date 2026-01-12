@@ -1,0 +1,837 @@
+1. If genders were accidentally swapped
+
+Example: males were marked as Female and females as Male.
+
+UPDATE employees
+SET gender = CASE
+    WHEN gender = 'Male' THEN 'Female'
+    WHEN gender = 'Female' THEN 'Male'
+END;
+
+
+2. You want the **2nd and 3rd highest salary employee names**.
+
+Given data (example):
+
+| Emp | Salary |
+| --- | ------ |
+| a   | 10000  |
+| b   | 8888   |
+| c   | 8888   |
+| d   | 7000   |
+| e   | 6000   |
+
+---
+
+## Key point
+
+* **Highest salary** = 10000 → `a`
+* **2nd highest salary** = 8888 → `b`, `c`
+* **3rd highest salary** = 7000 → `d`
+
+✅ **Answer:**
+**Second highest:** b, c
+**Third highest:** d
+
+---
+
+## SQL Query (Most Common & Correct Way)
+
+### Using `DENSE_RANK()` (recommended)
+
+Works even when salaries are duplicated.
+
+```sql
+SELECT emp_name, salary
+FROM (
+    SELECT emp_name, salary,
+           DENSE_RANK() OVER (ORDER BY salary DESC) AS rnk
+    FROM employee
+) t
+WHERE rnk IN (2, 3);
+```
+
+### Output:
+
+```
+b  8888
+c  8888
+d  7000
+```
+
+---
+
+## Alternative (Without window functions)
+
+```sql
+SELECT emp_name, salary
+FROM employee
+WHERE salary IN (
+    SELECT DISTINCT salary
+    FROM employee
+    ORDER BY salary DESC
+    LIMIT 2, 2
+);
+```
+
+---
+
+## If interviewer asks “why DENSE_RANK?”
+
+* `ROW_NUMBER()` → skips duplicates ❌
+* `RANK()` → skips ranks ❌
+* `DENSE_RANK()` → handles duplicates correctly ✅
+
+---
+Below is a **Snowflake-specific, interview-ready explanation** covering **what clustering is, what a cluster key is, and how Snowflake handles it internally**.
+
+---
+
+## 1. What is Clustering in Snowflake?
+
+**Clustering** in Snowflake is how data is **physically organized in micro-partitions** to optimize **query performance**, especially for **large tables**.
+
+* Snowflake stores data in **micro-partitions** (≈ 16 MB compressed)
+* Clustering determines **how rows are grouped** inside those micro-partitions
+* Better clustering → **less data scanned** → **faster queries & lower cost**
+
+---
+
+## 2. What is a Cluster Key?
+
+A **cluster key** is a **column (or expression)** used to **control how data is organized** in micro-partitions.
+
+### Example
+
+```sql
+CREATE TABLE sales (
+    order_id NUMBER,
+    order_date DATE,
+    country STRING,
+    amount NUMBER
+)
+CLUSTER BY (order_date, country);
+```
+
+* Data is physically ordered by `order_date`, then `country`
+* Helps queries that filter on these columns
+
+---
+
+## 3. How Snowflake Stores Data Internally
+
+### Micro-Partitions
+
+* Immutable
+* Automatically created
+* Contain **min/max metadata** for every column
+
+Example metadata:
+
+```
+order_date: 2023-01-01 → 2023-01-31
+country: US → US
+```
+
+Snowflake uses this metadata for **partition pruning**.
+
+---
+
+## 4. How Clustering Works Internally
+
+### Without Cluster Key
+
+* Data is loaded in **random order**
+* Micro-partitions have **wide min/max ranges**
+* Queries scan more data
+
+### With Cluster Key
+
+* Snowflake tries to **reorganize rows** so that:
+
+  * Similar values go into the same micro-partitions
+  * Min/max ranges are narrow
+* Improves **partition pruning**
+
+---
+
+## 5. Automatic Clustering (Key Difference from Other DBs)
+
+Snowflake:
+
+* **No indexes**
+* **No manual reindexing**
+* **No vacuum**
+
+When you define a cluster key:
+
+* Snowflake monitors **clustering depth**
+* Background services **automatically recluster**
+* Happens **incrementally**
+
+You pay only for the **compute used for reclustering**
+
+---
+
+## 6. Clustering Depth (Internal Metric)
+
+Clustering depth measures **how well data is clustered**.
+
+* **Low depth** → well clustered
+* **High depth** → data scattered
+
+Check clustering:
+
+```sql
+SELECT SYSTEM$CLUSTERING_INFORMATION('sales');
+```
+
+Example output:
+
+```json
+{
+  "clustering_depth": 1.2,
+  "total_partition_count": 1000
+}
+```
+
+---
+
+## 7. When to Use Cluster Keys (Very Important)
+
+✅ Use when:
+
+* Table size > **1 TB**
+* Queries filter on **same columns repeatedly**
+* Columns have **high cardinality** (date, timestamp, ID)
+
+❌ Avoid when:
+
+* Small tables
+* High-frequency inserts/updates
+* Low-selectivity columns (gender, status)
+
+---
+
+## 8. Example Query Benefit
+
+```sql
+SELECT *
+FROM sales
+WHERE order_date = '2024-01-01';
+```
+
+### Without clustering
+
+* Scans hundreds of partitions
+
+### With clustering
+
+* Scans only relevant partitions
+* Faster + cheaper
+
+---
+
+## 9. Snowflake vs Traditional Indexes
+
+| Feature        | Snowflake | Oracle / SQL Server |
+| -------------- | --------- | ------------------- |
+| Index          | ❌ No      | ✅ Yes               |
+| Partitioning   | Automatic | Manual              |
+| Reorganization | Automatic | Manual              |
+| Storage        | Columnar  | Row-based           |
+
+---
+
+## 10. Interview One-Line Summary
+
+> **Clustering in Snowflake physically organizes data inside micro-partitions using cluster keys. Snowflake automatically manages and maintains clustering using metadata and background services to improve partition pruning and query performance without traditional indexes.**
+
+
+
+
+Below is a **clear, interview-oriented explanation** of **STREAM, TASK, and SNOWPIPE in Snowflake**, including **differences, how they work internally, when to use each, and example SQL code with end-to-end flow**.
+
+---
+
+# 1. High-Level Purpose
+
+| Feature      | Purpose                                        |
+| ------------ | ---------------------------------------------- |
+| **STREAM**   | Track **data changes (CDC)** in tables         |
+| **TASK**     | Schedule or automate SQL execution             |
+| **SNOWPIPE** | **Continuous data ingestion** (near real-time) |
+
+---
+
+# 2. STREAM (Change Data Capture)
+
+## What is a Stream?
+
+A **STREAM** tracks **DML changes** (INSERT, UPDATE, DELETE) on a table.
+
+* Non-intrusive
+* No triggers
+* Uses metadata (offset-based)
+* Read-once semantics
+
+### How STREAM works internally
+
+* Snowflake stores **change offsets** per micro-partition
+* Stream records:
+
+  * INSERT / UPDATE / DELETE
+  * Metadata columns:
+
+    * `METADATA$ACTION`
+    * `METADATA$ISUPDATE`
+* Once read, data is **consumed**
+
+---
+
+## Create STREAM
+
+```sql
+CREATE OR REPLACE STREAM emp_stream
+ON TABLE employees;
+```
+
+### Read from STREAM
+
+```sql
+SELECT * FROM emp_stream;
+```
+
+### Apply changes
+
+```sql
+MERGE INTO emp_target t
+USING emp_stream s
+ON t.emp_id = s.emp_id
+WHEN MATCHED AND s.METADATA$ACTION = 'DELETE' THEN DELETE
+WHEN MATCHED THEN UPDATE SET t.salary = s.salary
+WHEN NOT MATCHED THEN INSERT VALUES (s.emp_id, s.salary);
+```
+
+---
+
+## When to use STREAM
+
+✅ Incremental processing
+✅ CDC pipelines
+✅ ELT architectures
+
+❌ Not for ingestion
+❌ Not for scheduling
+
+---
+
+# 3. TASK (Automation & Scheduling)
+
+## What is a Task?
+
+A **TASK** runs SQL on a **schedule or dependency chain**.
+
+* Cron-based or event-based
+* Can call procedures or SQL
+* Can use streams as input
+
+### How TASK works internally
+
+* Snowflake uses **serverless compute**
+* Task executes only when triggered
+* Can form **DAGs (task trees)**
+
+---
+
+## Create TASK
+
+```sql
+CREATE OR REPLACE TASK emp_task
+WAREHOUSE = compute_wh
+SCHEDULE = 'USING CRON 0 * * * * UTC'
+AS
+INSERT INTO emp_history
+SELECT * FROM emp_stream;
+```
+
+### Start TASK
+
+```sql
+ALTER TASK emp_task RESUME;
+```
+
+---
+
+## When to use TASK
+
+✅ Automate SQL
+✅ Incremental loads using streams
+✅ Orchestration
+
+❌ Not for real-time ingestion
+❌ Not for CDC capture alone
+
+---
+
+# 4. SNOWPIPE (Continuous Ingestion)
+
+## What is Snowpipe?
+
+**Snowpipe** loads data automatically when files arrive in cloud storage.
+
+* Near real-time
+* Serverless
+* Event-driven
+* No scheduling required
+
+---
+
+## How SNOWPIPE works internally
+
+1. File lands in S3 / Azure / GCS
+2. Cloud event notification fires
+3. Snowpipe COPY runs automatically
+4. Data loads into Snowflake
+
+---
+
+## Create Snowpipe
+
+```sql
+CREATE OR REPLACE PIPE emp_pipe
+AUTO_INGEST = TRUE
+AS
+COPY INTO employees
+FROM @emp_stage
+FILE_FORMAT = (TYPE = 'CSV');
+```
+
+---
+
+## When to use SNOWPIPE
+
+✅ Real-time ingestion
+✅ Streaming-like ingestion
+✅ Event-based loads
+
+❌ Not for transformation
+❌ Not for orchestration
+
+---
+
+# 5. End-to-End Flow (Most Common Interview Scenario)
+
+### Use Case: Real-Time Analytics Pipeline
+
+```
+Cloud Storage → Snowpipe → Raw Table
+                         ↓
+                       Stream
+                         ↓
+                       Task
+                         ↓
+                   Final Table
+```
+
+---
+
+### Step 1: Snowpipe (Ingest)
+
+```sql
+CREATE PIPE raw_pipe
+AUTO_INGEST = TRUE
+AS COPY INTO raw_sales FROM @sales_stage;
+```
+
+---
+
+### Step 2: Stream (Track changes)
+
+```sql
+CREATE STREAM raw_sales_stream
+ON TABLE raw_sales;
+```
+
+---
+
+### Step 3: Task (Transform & load)
+
+```sql
+CREATE TASK sales_task
+WAREHOUSE = compute_wh
+AFTER raw_pipe
+AS
+MERGE INTO sales_final f
+USING raw_sales_stream s
+ON f.id = s.id
+WHEN MATCHED THEN UPDATE SET f.amount = s.amount
+WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.amount);
+```
+
+---
+
+# 6. Key Differences (Interview Table)
+
+| Feature       | Stream      | Task             | Snowpipe     |
+| ------------- | ----------- | ---------------- | ------------ |
+| Purpose       | CDC         | Automation       | Ingestion    |
+| Trigger       | Data change | Schedule / Event | File arrival |
+| Real-time     | ❌           | ❌                | ✅            |
+| Uses compute  | Minimal     | Yes              | Serverless   |
+| Handles files | ❌           | ❌                | ✅            |
+
+---
+
+# 7. Why choose one over the others?
+
+| Scenario                 | Best Choice   |
+| ------------------------ | ------------- |
+| Detect data changes      | STREAM        |
+| Schedule transformations | TASK          |
+| Load files instantly     | SNOWPIPE      |
+| Build CDC pipeline       | STREAM + TASK |
+| Streaming ingestion      | SNOWPIPE      |
+
+---
+
+# 8. Interview One-Liner Summary
+
+> **Snowpipe ingests data, Streams capture changes, and Tasks automate processing. Together, they form Snowflake’s core real-time ELT pipeline architecture.**
+
+---
+Ah! This is a **common point of confusion**, so let’s clarify carefully.
+
+**Short answer:** ✅ You **don’t always need a STREAM**. It depends on whether you want **change tracking (CDC)**.
+
+Let’s break it down.
+
+---
+
+## 1. SNOWPIPE
+
+**Snowpipe** is for **continuous ingestion** from files (S3, Azure, GCS).
+
+* **Do you need a STREAM?**
+  **No**, if all you want is to **load raw data into a table**. Snowpipe alone can load files directly into a table.
+
+* **Use STREAM with Snowpipe**
+  Only if you want to **track incremental changes** in the table after Snowpipe loads.
+
+**Example Flow:**
+
+```
+Files in S3 → Snowpipe → raw_table → Stream → transformation Task → final_table
+```
+
+* Here, the STREAM is used **after Snowpipe** to capture new rows or changes and feed downstream Tasks.
+
+---
+
+## 2. TASK
+
+**TASK** is for **scheduling SQL execution** or running SQL when triggered.
+
+* **Do you need a STREAM?**
+  **Not necessarily.** Task can:
+
+  * Run any SQL (like `INSERT INTO table2 SELECT * FROM table1`)
+  * Run procedures
+  * Run transformations
+
+* **Use STREAM with Task**
+  Only if you want the Task to process **just the new or changed rows** since the last run.
+
+**Example without STREAM:**
+
+```sql
+CREATE TASK transform_task
+SCHEDULE = 'USING CRON 0 * * * * UTC'
+AS
+INSERT INTO final_table
+SELECT * FROM raw_table;  -- processes full table
+```
+
+**Example with STREAM:**
+
+```sql
+CREATE TASK transform_task
+SCHEDULE = 'USING CRON 0 * * * * UTC'
+AS
+MERGE INTO final_table f
+USING raw_table_stream s
+ON f.id = s.id
+WHEN MATCHED THEN UPDATE SET f.amount = s.amount
+WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.amount);
+```
+
+* With STREAM, Task processes **only incremental changes**, saving compute.
+
+---
+
+## 3. When to use STREAM
+
+* **CDC pipelines**: you want to process **only new/updated/deleted rows**.
+* **Large tables**: avoid full table scans for each Task run.
+* **Multiple downstream pipelines**: each Task can read the Stream independently.
+
+**When not needed:**
+
+* Small tables / simple ingestion
+* Full refresh transformations
+* Files already deduplicated
+
+---
+
+## ✅ Summary Table
+
+| Feature  | Need STREAM? | When to use STREAM                                         |
+| -------- | ------------ | ---------------------------------------------------------- |
+| Snowpipe | No           | Only if downstream incremental processing is required      |
+| Task     | No           | Only if you want incremental changes instead of full table |
+| Stream   | Yes          | To track changes (CDC) between table states                |
+
+**Rule of thumb:**
+
+> STREAM is optional. Use it only if you want **incremental processing**. Snowpipe and Task can run independently.
+
+---
+Ah! You’re asking about **Snowflake** specifically and whether, for backup purposes, it’s better to **create a clone** or **create a new table**. Let’s break this down carefully.
+
+---
+
+## 1️⃣ **Create Clone in Snowflake**
+
+Snowflake allows you to create a **zero-copy clone** of a table:
+
+```sql
+CREATE TABLE my_table_clone CLONE my_table;
+```
+
+### **Advantages of Clone**
+
+1. **Zero-copy**
+
+   * Doesn’t duplicate the underlying data immediately.
+   * Only stores metadata references. Very fast and storage-efficient.
+
+2. **Point-in-time backup**
+
+   * You can clone the table as it exists **at a specific time**.
+   * Later changes to the original **won’t affect the clone**, and vice versa.
+
+3. **Quick restore / rollback**
+
+   * If something goes wrong, you can revert to the cloned table immediately.
+
+4. **Cost-efficient**
+
+   * Because Snowflake doesn’t duplicate the actual data, you save storage costs compared to creating a full copy.
+
+---
+
+## 2️⃣ **Create a New Table (with `CREATE TABLE AS SELECT`)**
+
+```sql
+CREATE TABLE my_table_backup AS
+SELECT * FROM my_table;
+```
+
+### **Advantages**
+
+1. Fully independent copy
+
+   * The backup table is **physically separate**, so any changes to the original table do not affect it.
+   * Safe if you want a permanent snapshot that won’t depend on Snowflake’s storage references.
+
+2. Can transform data
+
+   * You can filter, aggregate, or transform while creating the backup.
+
+### **Disadvantages**
+
+* Takes **more time** for large tables.
+* Consumes **full storage** for the duplicate.
+* Less flexible for quick point-in-time restore compared to cloning.
+
+---
+
+## ✅ **So which one to use?**
+
+| Criteria                       | Clone                           | New Table (`CTAS`)   |
+| ------------------------------ | ------------------------------- | -------------------- |
+| Speed                          | Very fast (metadata only)       | Slower (copies data) |
+| Storage cost                   | Minimal                         | Full table size      |
+| Point-in-time snapshot         | Easy (use `AT` timestamp)       | Not automatic        |
+| Independent backup (permanent) | Dependent on base table history | Fully independent    |
+| Ability to transform data      | No                              | Yes                  |
+
+**Rule of thumb in Snowflake:**
+
+* **Use Clone** for **quick, cost-effective backups** and **point-in-time snapshots**.
+* **Use CTAS (new table)** if you need a **completely independent copy** or want to **transform/filter the data** during backup.
+
+---
+
+💡 **Extra tip:**
+Clones are amazing because you can do **time-travel + cloning**, e.g.:
+
+```sql
+CREATE TABLE my_table_clone AT (OFFSET => -1 DAY) CLONE my_table;
+```
+
+This gives you the table as it was **1 day ago** without physically copying the data.
+
+---
+
+Ah! You’re asking a deep Snowflake internals question about **micro-partitions** and how **UPDATE/DELETE** operations work. Let’s go **step by step**, carefully distinguishing the behavior.
+
+---
+
+## 1️⃣ Basics of Snowflake Micro-Partitions
+
+* Every table in Snowflake is automatically divided into **micro-partitions**, typically containing **50 MB – 500 MB** of **compressed columnar data**.
+* Micro-partitions are **immutable**. That is, Snowflake **does not update the data in place**.
+* Each micro-partition has **metadata** including:
+
+  * Min/max values of each column
+  * Number of distinct values
+  * Row counts, etc.
+* Snowflake uses this metadata to **prune partitions** for queries and DML operations (UPDATE/DELETE).
+
+---
+
+## 2️⃣ Scenario: 10 rows partitioned into 2 micro-partitions
+
+Suppose your table looks like this:
+
+| Micro-partition | Records       |
+| --------------- | ------------- |
+| MP1             | a, b, c, d, e |
+| MP2             | f, g, h, i, j |
+
+---
+
+### Case A: UPDATE some records in **one micro-partition**
+
+Example:
+
+```sql
+UPDATE my_table
+SET salary = salary + 100
+WHERE emp_name IN ('b','c');
+```
+
+* **Step 1: Pruning**
+  Snowflake looks at the metadata of all micro-partitions and finds which partitions **may contain the rows to update**.
+
+  * MP1 has b, c → selected
+  * MP2 has no matching rows → skipped
+
+* **Step 2: Create new micro-partitions**
+  Snowflake **does not modify MP1 directly**. Instead:
+
+  1. It reads MP1 into a new micro-partition in memory.
+  2. Applies the UPDATE.
+  3. Writes a **new micro-partition** with updated rows.
+  4. Marks the old micro-partition as **inactive (soft-deleted)**.
+
+* **Step 3: Metadata update**
+
+  * The table metadata now points to:
+
+    * New micro-partition (updated b, c)
+    * Original micro-partition (unchanged a, d, e?) → sometimes split into multiple partitions depending on storage
+    * MP2 untouched
+
+✅ **Result:** Only the micro-partitions containing affected rows are rewritten. Snowflake never touches MP2.
+
+---
+
+### Case B: UPDATE some records across **both micro-partitions**
+
+```sql
+UPDATE my_table
+SET salary = salary + 100
+WHERE salary < 8000;
+```
+
+* Suppose rows with salary < 8000 exist in **both MP1 and MP2**.
+
+* **Step 1: Pruning**
+
+  * MP1 → has matching rows → selected
+  * MP2 → has matching rows → selected
+
+* **Step 2: Rewrite selected micro-partitions**
+
+  * MP1 → new micro-partition created with updated rows
+  * MP2 → new micro-partition created with updated rows
+
+* **Step 3: Metadata update**
+
+  * Table metadata points to the **new micro-partitions**. Old ones are soft-deleted.
+
+✅ **Result:** Only micro-partitions containing affected rows are rewritten. Unaffected micro-partitions are untouched.
+
+---
+
+## 3️⃣ DELETE operation
+
+DELETE works **almost exactly like UPDATE**, because Snowflake cannot modify micro-partitions in place.
+
+Example:
+
+```sql
+DELETE FROM my_table
+WHERE emp_name IN ('b','f');
+```
+
+* Prune micro-partitions using metadata → find MP1 (b) and MP2 (f)
+
+* For each selected micro-partition:
+
+  1. Read partition into memory
+  2. Remove the rows marked for deletion
+  3. Write a **new micro-partition**
+  4. Old micro-partition is **soft-deleted**
+
+* Metadata is updated to point to the new micro-partitions.
+
+✅ Key point: Micro-partitions are **never modified in place**. Only the affected micro-partitions are rewritten.
+
+---
+
+## 4️⃣ Summary Table of Internal Behavior
+
+| Operation | Step     | Behavior on micro-partitions                                                  |
+| --------- | -------- | ----------------------------------------------------------------------------- |
+| UPDATE    | Prune    | Only partitions that may contain affected rows are selected                   |
+|           | Rewrite  | Selected partitions are read, updated in memory, new micro-partitions written |
+|           | Metadata | Table metadata updated; old partitions soft-deleted                           |
+| DELETE    | Prune    | Only partitions that may contain affected rows are selected                   |
+|           | Rewrite  | Rows removed in memory; new micro-partitions written                          |
+|           | Metadata | Table metadata updated; old partitions soft-deleted                           |
+
+---
+
+### 5️⃣ Extra notes
+
+* Snowflake keeps **time-travel** copies, so old micro-partitions are still available until they expire.
+* Snowflake **columnar storage** + **metadata pruning** makes UPDATE/DELETE efficient for **small subsets of data**, even though it writes new partitions.
+* If **all rows in a table** are updated, all micro-partitions are rewritten.
+
+---
+
+If you want, I can **draw a diagram showing 10 rows in 2 micro-partitions and exactly what happens internally** during UPDATE and DELETE in Snowflake—it makes it super clear visually.
+
+Do you want me to make that diagram?
+
+
+draw a diagram showing 10 rows in 2 micro-partitions and exactly what happens internally during UPDATE and DELETE in Snowflake
+
+
+
+
+
+
